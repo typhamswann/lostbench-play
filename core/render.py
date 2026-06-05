@@ -49,6 +49,10 @@ def _ensure_pano(image_id: str, panos_dir: Path) -> Path | None:
 
     R2 is the canonical source. Set WANDERBENCH_LAZY=0 to disable remote fetch
     (local-only). Object layout: panos/{id%100:02d}/{id}.jpg.
+
+    Fetch order: the public HTTP bucket URL (WANDERBENCH_PANOS_PUBLIC_URL) first —
+    no credentials, which is what hosted deployments use — then the private S3 API
+    (R2_ENDPOINT + keys) as a fallback for local/dev where those are set.
     """
     local = panos_dir / f"{image_id}.jpg"
     if local.exists():
@@ -60,25 +64,45 @@ def _ensure_pano(image_id: str, panos_dir: Path) -> Path | None:
     except (TypeError, ValueError):
         shard = ""
     key = f"panos/{shard}{image_id}.jpg"
-    try:
-        import boto3
-        from botocore.config import Config
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=os.environ["R2_ENDPOINT"],
-            aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-            aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-            region_name="auto",
-            config=Config(retries={"max_attempts": 5, "mode": "adaptive"},
-                          read_timeout=30, connect_timeout=10),
-        )
-        panos_dir.mkdir(parents=True, exist_ok=True)
-        tmp = local.with_suffix(".jpg.part")
-        s3.download_file(os.environ.get("R2_BUCKET", "main"), key, str(tmp))
-        tmp.rename(local)
-        return local
-    except Exception:
-        return None
+    panos_dir.mkdir(parents=True, exist_ok=True)
+    tmp = local.with_suffix(".jpg.part")
+
+    # 1) Public HTTP (no creds) — the canonical path for hosted deploys.
+    base = os.environ.get("WANDERBENCH_PANOS_PUBLIC_URL", "").rstrip("/")
+    if base:
+        try:
+            import urllib.request
+            url = f"{base}/{key}"
+            req = urllib.request.Request(url, headers={"User-Agent": "lostbench-play"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read()
+            if data:
+                tmp.write_bytes(data)
+                tmp.rename(local)
+                return local
+        except Exception:
+            pass
+
+    # 2) Private S3 API fallback (only if creds are configured).
+    if os.environ.get("R2_ENDPOINT") and os.environ.get("R2_ACCESS_KEY_ID"):
+        try:
+            import boto3
+            from botocore.config import Config
+            s3 = boto3.client(
+                "s3",
+                endpoint_url=os.environ["R2_ENDPOINT"],
+                aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+                aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+                region_name="auto",
+                config=Config(retries={"max_attempts": 5, "mode": "adaptive"},
+                              read_timeout=30, connect_timeout=10),
+            )
+            s3.download_file(os.environ.get("R2_BUCKET", "main"), key, str(tmp))
+            tmp.rename(local)
+            return local
+        except Exception:
+            pass
+    return None
 
 
 def _render_pano(sim: WorldSim) -> Image.Image:
