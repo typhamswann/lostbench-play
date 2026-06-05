@@ -146,11 +146,14 @@ def _new_sim(task):
 HTML = r"""<!doctype html>
 <html><head><title>wanderbench</title>
 <style>
+  html, body { overscroll-behavior: contain; }
   body { background: #111; color: #eee; font-family: system-ui, sans-serif; margin: 0; padding: 12px; }
-  .row { display: flex; gap: 16px; }
-  .panel { background: #222; padding: 12px; border-radius: 6px; }
-  #view-wrap { position: relative; width: 1024px; height: 768px; overflow: hidden; border-radius: 4px; background: #000; }
-  #view { width: 1024px; height: 768px; cursor: crosshair; user-select: none; -webkit-user-drag: none;
+  .row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .view-col { flex: 1 1 460px; min-width: 0; max-width: 1024px; }
+  .panel { background: #222; padding: 12px; border-radius: 6px; flex: 1 1 240px; min-width: 220px; }
+  #view-wrap { position: relative; width: 100%; max-width: 1024px; aspect-ratio: 4 / 3;
+    overflow: hidden; border-radius: 4px; background: #000; }
+  #view { width: 100%; height: 100%; cursor: crosshair; user-select: none; -webkit-user-drag: none;
     will-change: transform; transition: none; display: block; }
   #view.dragging { cursor: grabbing; }
   .key { background: #333; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
@@ -163,10 +166,22 @@ HTML = r"""<!doctype html>
     font-size: 24px; font-weight: bold; pointer-events: none; }
   #busy { position: absolute; top: 8px; left: 8px; background: rgba(255, 200, 0, 0.85); color: #000;
     padding: 4px 10px; border-radius: 3px; font-size: 12px; font-weight: bold; display: none; }
+  /* Compact layout for embedding (?embed=1): hide dev/diagnostic chrome, keep
+     just the view + task dropdown + submit. */
+  body.embed { padding: 8px; }
+  body.embed .panel { background: transparent; padding: 0; min-width: 0; flex-basis: 100%; }
+  body.embed .panel h2,
+  body.embed #task-info,
+  body.embed #state-info,
+  body.embed #last-action,
+  body.embed #debug-toggle-btn,
+  body.embed #debug-replay { display: none !important; }
+  body.embed #task-picker { margin: 8px 0; }
+  body.embed #submit-guess-btn { margin-top: 0; }
 </style></head>
 <body>
 <div class="row">
-  <div>
+  <div class="view-col">
     <div id="view-wrap">
       <img id="view" draggable="false" />
       <div id="busy">working…</div>
@@ -228,6 +243,10 @@ HTML = r"""<!doctype html>
 </div>
 
 <script>
+// Compact embed mode when loaded as ?embed=1 (used by the LostBench site iframe).
+if (new URLSearchParams(location.search).get('embed') === '1') {
+  document.body.classList.add('embed');
+}
 const VIEW_W = 1024, VIEW_H = 768;
 const CLICK_PX_THRESHOLD = 25;  // matches sim.py — generous, since trackpad clicks jitter
 let cursorX = VIEW_W / 2, cursorY = VIEW_H / 2;  // mirror of WorldSim cursor
@@ -395,8 +414,12 @@ viewEl.addEventListener('mousemove', (e) => {
   dragCurX = x; dragCurY = y;
   // Live CSS-translate preview of the drag (only meaningful in pano view).
   // Drag right → image shifts right (mirrors the eventual yaw rotation visually).
-  const tx = x - dragStartX;
-  const ty = y - dragStartY;
+  // tx/ty are in image space (0..VIEW_W); scale to the element's *displayed*
+  // size so the preview tracks the cursor and never slides the frame off a
+  // shrunk (embedded) viewport — which looked like "no image" while dragging.
+  const scale = (viewEl.getBoundingClientRect().width || VIEW_W) / VIEW_W;
+  const tx = (x - dragStartX) * scale;
+  const ty = (y - dragStartY) * scale;
   viewEl.style.transform = `translate(${tx}px, ${ty}px)`;
 });
 
