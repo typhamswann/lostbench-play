@@ -1,0 +1,5 @@
+flask==3.0.3
+gunicorn==22.0.0
+pillow==10.4.0
+numpy==1.26.4
+py360convert==1.0.3
