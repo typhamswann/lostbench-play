@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: lostbench-play
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: WANDERBENCH_PANOS_PUBLIC_URL
+        value: https://pub-b410c3932f6242a08d9d3f2d6ed556a8.r2.dev
+      - key: LB_DEFAULT_TASK
+        value: cell_new_00236_easy_02
+      - key: LB_COMPASS
+        value: "1"
+      - key: LB_MAP_SELF
+        value: "1"
+      - key: LB_SESSION_TTL
+        value: "1800"
+      - key: LB_MAX_SESSIONS
+        value: "2000"
