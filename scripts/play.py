@@ -72,7 +72,15 @@ def _sid() -> str:
     sid = getattr(g, "_sid", None)
     if sid:
         return sid
-    sid = request.cookies.get("lb_sid")
+    # Prefer an explicit token (query param or header) over the cookie. In a
+    # cross-site <iframe> (LostBench page embeds this on another origin) the
+    # lb_sid cookie is a *third-party* cookie and is blocked by most modern
+    # browsers — so a cookie-only session renders /init once but loses state on
+    # the next request ("no sim" -> blank frame). The client captures the sid
+    # returned by /init and echoes it on every call via ?sid=/X-LB-Session.
+    sid = (request.args.get("sid")
+           or request.headers.get("X-LB-Session")
+           or request.cookies.get("lb_sid"))
     g._sid_isnew = not sid
     if not sid:
         sid = uuid.uuid4().hex
@@ -247,6 +255,35 @@ HTML = r"""<!doctype html>
 if (new URLSearchParams(location.search).get('embed') === '1') {
   document.body.classList.add('embed');
 }
+
+// Session continuity WITHOUT cookies. When this page is embedded in a cross-site
+// <iframe>, the lb_sid cookie is a third-party cookie and is blocked by most
+// browsers — so the server would lose the sim after /init and every later action
+// returns "no sim" (blank frame). Instead we carry the session id explicitly:
+// capture the `sid` the server returns and echo it on every request via a
+// ?sid= query param and the X-LB-Session header. This fetch wrapper does both
+// transparently for all call-sites.
+let SID = null;
+(function () {
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (url, opts) {
+    opts = opts || {};
+    if (typeof url === 'string' && url.charAt(0) === '/' && SID) {
+      url += (url.indexOf('?') >= 0 ? '&' : '?') + 'sid=' + encodeURIComponent(SID);
+      const h = new Headers(opts.headers || {});
+      h.set('X-LB-Session', SID);
+      opts.headers = h;
+    }
+    return _origFetch(url, opts).then(function (resp) {
+      try {
+        if ((resp.headers.get('content-type') || '').indexOf('application/json') >= 0) {
+          resp.clone().json().then(function (d) { if (d && d.sid) SID = d.sid; }).catch(function () {});
+        }
+      } catch (e) {}
+      return resp;
+    });
+  };
+})();
 const VIEW_W = 1024, VIEW_H = 768;
 const CLICK_PX_THRESHOLD = 25;  // matches sim.py — generous, since trackpad clicks jitter
 let cursorX = VIEW_W / 2, cursorY = VIEW_H / 2;  // mirror of WorldSim cursor
@@ -332,6 +369,11 @@ async function callBatch(actions) {
 }
 
 function applyResponse(data) {
+  if (data && data.sid) SID = data.sid;
+  if (!data || !data.image_b64) {  // session lost / server error — don't blank the frame
+    if (data && data.error) lastActionEl.textContent = 'error: ' + data.error;
+    return;
+  }
   viewEl.src = 'data:image/jpeg;base64,' + data.image_b64;
   cursorX = data.cursor_x;
   cursorY = data.cursor_y;
@@ -1009,6 +1051,7 @@ def _state_dict(sim: WorldSim) -> dict:
 
 def _response(sim: WorldSim) -> dict:
     return {
+        "sid": _sid(),
         "image_b64": _frame_b64(sim),
         "cursor_x": sim.cursor_x,
         "cursor_y": sim.cursor_y,
