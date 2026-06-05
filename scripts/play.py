@@ -169,20 +169,29 @@ HTML = r"""<!doctype html>
     border: 1px solid #444; border-radius: 4px; font-size: 13px; cursor: pointer;
     font-family: inherit; }
   .ctrl:hover { background: #353535; }
-  .instructions { font-size: 12px; color: #9a9a9a; margin-top: 10px; line-height: 1.5; }
-  .instructions b { color: #ddd; font-weight: 600; }
-  .instructions ul { margin: 6px 0 0; padding-left: 18px; }
-  .instructions li { margin: 3px 0; }
+  /* Result overlay shown after submit_guess */
+  .result-overlay { display: none; position: absolute; inset: 0; z-index: 5;
+    background: rgba(10,10,10,0.80); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+    align-items: center; justify-content: center; }
+  .result-overlay.show { display: flex; }
+  .result-card { text-align: center; color: #f5f5f5; font-family: system-ui, sans-serif; padding: 24px 28px; }
+  .result-title { font-size: 13px; letter-spacing: 0.10em; text-transform: uppercase; color: #9a9a9a; }
+  .result-score { font-size: 58px; font-weight: 200; line-height: 1.05; margin-top: 8px; color: #65d697; }
+  .result-sub { font-size: 11px; color: #777; letter-spacing: 0.10em; text-transform: uppercase; margin-top: 2px; }
+  .result-detail { font-size: 13px; color: #cfcfcf; margin-top: 12px; }
+  .result-btn { margin-top: 20px; padding: 10px 24px; background: #65d697; color: #0a0a0a;
+    border: 0; border-radius: 5px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  .result-btn:hover { background: #79e0a6; }
   .key { background: #333; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
   table { border-collapse: collapse; }
   td { padding: 2px 8px; }
   td.k { color: #888; }
   h2 { margin: 4px 0 8px; font-size: 14px; color: #888; font-weight: normal; text-transform: uppercase; letter-spacing: 0.06em; }
-  #done-banner { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    background: rgba(20, 200, 60, 0.95); color: white; padding: 20px 40px; border-radius: 6px;
-    font-size: 24px; font-weight: bold; pointer-events: none; }
-  #busy { position: absolute; top: 8px; left: 8px; background: rgba(255, 200, 0, 0.85); color: #000;
-    padding: 4px 10px; border-radius: 3px; font-size: 12px; font-weight: bold; display: none; }
+  #busy { display: none; position: absolute; top: 12px; left: 12px; z-index: 4;
+    width: 24px; height: 24px; border-radius: 50%;
+    border: 2.5px solid rgba(255,255,255,0.18); border-top-color: #65d697;
+    animation: lb-spin 0.7s linear infinite; }
+  @keyframes lb-spin { to { transform: rotate(360deg); } }
   /* Compact layout for embedding (?embed=1): hide dev/diagnostic chrome, keep
      just the view + task dropdown + submit. */
   body.embed { padding: 8px; }
@@ -201,8 +210,16 @@ HTML = r"""<!doctype html>
   <div class="view-col">
     <div id="view-wrap">
       <img id="view" draggable="false" />
-      <div id="busy">working…</div>
-      <div id="done-banner">GUESS SUBMITTED</div>
+      <div id="busy"></div>
+      <div id="result" class="result-overlay">
+        <div class="result-card">
+          <div class="result-title" id="result-title">Arrived</div>
+          <div class="result-score" id="result-score">0.00</div>
+          <div class="result-sub">score &middot; 0&ndash;1</div>
+          <div class="result-detail" id="result-detail"></div>
+          <button id="result-restart" class="result-btn" type="button">Play again</button>
+        </div>
+      </div>
       <canvas id="debug-minimap" width="380" height="380" style="display:none;
               position:absolute;top:10px;right:10px;border:2px solid #fff;
               border-radius:4px;background:#fafafa;box-shadow:0 2px 8px rgba(0,0,0,0.4)"></canvas>
@@ -210,20 +227,6 @@ HTML = r"""<!doctype html>
     <div class="ctrl-bar">
       <button id="map-btn" class="ctrl" type="button">Open map</button>
       <button id="reset-btn" class="ctrl" type="button">Reset</button>
-    </div>
-    <div class="instructions">
-      This is the same task the models were given: navigate from the start to the
-      goal, then hit <b>Submit</b> to declare you've arrived (you get one attempt).
-      You're scored by how close you get &mdash; the HUD shows your distance to the goal.
-      <ul>
-        <li><b>Click the street</b> where you want to walk. The further toward the
-            horizon you click, the further you travel. Clicks on the sky or
-            buildings do nothing.</li>
-        <li><b>Drag</b> to look around &middot; <b>Scroll</b> to zoom.</li>
-        <li><b>Open the map</b> to see the start (green pin), the goal (red pin),
-            and the blue box you must stay inside. Your location is the blue dot;
-            the compass (top-left) shows the way you're facing (red points north).</li>
-      </ul>
     </div>
   </div>
   <div class="panel" style="min-width:260px">
@@ -268,7 +271,6 @@ HTML = r"""<!doctype html>
       <div id="replay-label" style="font-size:10px;color:#888;font-family:monospace;
            margin-top:4px;word-break:break-all;min-height:14px"></div>
     </div>
-    <div id="guess-result" style="margin-top:10px;font-size:13px;display:none"></div>
   </div>
 </div>
 
@@ -314,7 +316,6 @@ let busyEl = document.getElementById('busy');
 let stateEl = document.getElementById('state-info');
 let taskEl = document.getElementById('task-info');
 let lastActionEl = document.getElementById('last-action');
-let doneBanner = document.getElementById('done-banner');
 
 // Drag-preview state
 let dragActive = false;
@@ -400,7 +401,6 @@ function applyResponse(data) {
   cursorX = data.cursor_x;
   cursorY = data.cursor_y;
   renderState(data.state);
-  doneBanner.style.display = data.state.done ? 'block' : 'none';
   lastState = data.state;
   var mapBtn = document.getElementById('map-btn');
   if (mapBtn) mapBtn.textContent = (data.state.view_mode === 'map') ? 'Close map' : 'Open map';
@@ -409,15 +409,31 @@ function applyResponse(data) {
     refreshHistoryUI();
   }
   if (data.state.guess_submitted) {
-    const r = document.getElementById('guess-result');
-    const err = data.state.guess_error_m;
-    const init = data.state.initial_distance_m;
-    const score = Math.max(0, Math.min(1, 1 - err / Math.max(1, init)));
-    r.style.display = 'block';
-    r.innerHTML = `<b>Guess submitted</b><br>Error: ${err.toFixed(1)} m<br>` +
-                  `Reward: ${score.toFixed(3)}`;
+    showResult(data.state);
     document.getElementById('submit-guess-btn').disabled = true;
   }
+}
+
+function showResult(s) {
+  const err = s.guess_error_m, init = s.initial_distance_m;
+  const score = Math.max(0, Math.min(1, 1 - err / Math.max(1, init)));
+  let title, color;
+  if (score >= 0.995)      { title = 'Bullseye';      color = '#65d697'; }
+  else if (score >= 0.90)  { title = 'So close';      color = '#65d697'; }
+  else if (score >= 0.60)  { title = 'Close';         color = '#e8c468'; }
+  else if (score >= 0.30)  { title = 'Off the mark';  color = '#e8c468'; }
+  else                     { title = 'Lost';          color = '#e07a5a'; }
+  document.getElementById('result-title').textContent = title;
+  const sc = document.getElementById('result-score');
+  sc.textContent = score.toFixed(2); sc.style.color = color;
+  document.getElementById('result-detail').textContent =
+    Math.round(err) + ' m from the goal · started ' + Math.round(init) + ' m away';
+  document.getElementById('result').classList.add('show');
+}
+
+function hideResult() {
+  document.getElementById('result').classList.remove('show');
+  document.getElementById('submit-guess-btn').disabled = false;
 }
 
 function renderState(s) {
@@ -545,6 +561,7 @@ document.addEventListener('keydown', async (e) => {
 });
 
 async function resetTask() {
+  hideResult();
   setBusy(true);
   try { applyResponse(await (await fetch('/init')).json()); }
   finally { setBusy(false); }
@@ -555,6 +572,7 @@ document.getElementById('map-btn').addEventListener('click', async () => {
   await callBatch([{tool: inMap ? 'close_map' : 'open_map'}]);
 });
 document.getElementById('reset-btn').addEventListener('click', resetTask);
+document.getElementById('result-restart').addEventListener('click', resetTask);
 
 document.getElementById('submit-guess-btn').addEventListener('click', async () => {
   await callBatch([{tool: 'submit_guess'}]);
@@ -1012,10 +1030,9 @@ taskPicker.addEventListener('change', async () => {
   miniPanX = 0; miniPanY = 0; miniZoomOverride = null;  // reset minimap viewport
   setBusy(true);
   try {
+    hideResult();
     const r = await fetch('/init?task_id=' + encodeURIComponent(target));
     applyResponse(await r.json());
-    document.getElementById('submit-guess-btn').disabled = false;
-    document.getElementById('guess-result').style.display = 'none';
   } finally { setBusy(false); }
 });
 
