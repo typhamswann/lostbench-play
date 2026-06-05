@@ -164,6 +164,15 @@ HTML = r"""<!doctype html>
   #view { width: 100%; height: 100%; cursor: crosshair; user-select: none; -webkit-user-drag: none;
     will-change: transform; transition: none; display: block; }
   #view.dragging { cursor: grabbing; }
+  .ctrl-bar { display: flex; gap: 8px; margin-top: 8px; }
+  .ctrl { flex: 1; padding: 8px 10px; background: #2a2a2a; color: #eee;
+    border: 1px solid #444; border-radius: 4px; font-size: 13px; cursor: pointer;
+    font-family: inherit; }
+  .ctrl:hover { background: #353535; }
+  .instructions { font-size: 12px; color: #9a9a9a; margin-top: 10px; line-height: 1.5; }
+  .instructions b { color: #ddd; font-weight: 600; }
+  .instructions ul { margin: 6px 0 0; padding-left: 18px; }
+  .instructions li { margin: 3px 0; }
   .key { background: #333; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
   table { border-collapse: collapse; }
   td { padding: 2px 8px; }
@@ -198,10 +207,23 @@ HTML = r"""<!doctype html>
               position:absolute;top:10px;right:10px;border:2px solid #fff;
               border-radius:4px;background:#fafafa;box-shadow:0 2px 8px rgba(0,0,0,0.4)"></canvas>
     </div>
-    <div style="font-size:12px;color:#888;margin-top:6px">
-      <b>Click on the street</b> to walk there (click near horizon = travel far). <b>Click-and-drag</b> = pan camera.
-      <b>Scroll</b> = zoom. <span class="key">M</span> open map, <span class="key">N</span> close map,
-      <span class="key">R</span> reset.
+    <div class="ctrl-bar">
+      <button id="map-btn" class="ctrl" type="button">Open map</button>
+      <button id="reset-btn" class="ctrl" type="button">Reset</button>
+    </div>
+    <div class="instructions">
+      This is the same task the models were given: navigate from the start to the
+      goal, then hit <b>Submit</b> to declare you've arrived (you get one attempt).
+      You're scored by how close you get &mdash; the HUD shows your distance to the goal.
+      <ul>
+        <li><b>Click the street</b> where you want to walk. The further toward the
+            horizon you click, the further you travel. Clicks on the sky or
+            buildings do nothing.</li>
+        <li><b>Drag</b> to look around &middot; <b>Scroll</b> to zoom.</li>
+        <li><b>Open the map</b> to see the start (green pin), the goal (red pin),
+            and the blue box you must stay inside. Your location is the blue dot;
+            the compass (top-left) shows the way you're facing (red points north).</li>
+      </ul>
     </div>
   </div>
   <div class="panel" style="min-width:260px">
@@ -380,6 +402,8 @@ function applyResponse(data) {
   renderState(data.state);
   doneBanner.style.display = data.state.done ? 'block' : 'none';
   lastState = data.state;
+  var mapBtn = document.getElementById('map-btn');
+  if (mapBtn) mapBtn.textContent = (data.state.view_mode === 'map') ? 'Close map' : 'Open map';
   if (debugMode) {
     ensureGraphLoaded().then(drawMinimap);
     refreshHistoryUI();
@@ -519,6 +543,18 @@ document.addEventListener('keydown', async (e) => {
     } finally { setBusy(false); }
   }
 });
+
+async function resetTask() {
+  setBusy(true);
+  try { applyResponse(await (await fetch('/init')).json()); }
+  finally { setBusy(false); }
+}
+
+document.getElementById('map-btn').addEventListener('click', async () => {
+  const inMap = lastState && lastState.view_mode === 'map';
+  await callBatch([{tool: inMap ? 'close_map' : 'open_map'}]);
+});
+document.getElementById('reset-btn').addEventListener('click', resetTask);
 
 document.getElementById('submit-guess-btn').addEventListener('click', async () => {
   await callBatch([{tool: 'submit_guess'}]);
