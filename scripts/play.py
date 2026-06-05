@@ -15,12 +15,15 @@ import argparse
 import base64
 import io
 import json
+import os
 import sys
+import threading
 import time as _time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -30,24 +33,108 @@ from core.tasks import load_tasks  # noqa: E402
 
 
 app = Flask(__name__)
-STATE: dict = {"sim": None, "task_id": None,
-                # Difficulty toggles (default off); set from CLI in main().
-                "opts": {"show_compass": False, "map_show_self": False},
-                # Tasks file to load from (overridable via --tasks-path).
-                "tasks_path": None,
-                # Action history for debug replay. Each entry is a state snapshot
-                # taken AFTER an action ran. history_idx points at the currently-
-                # displayed snapshot; -1 means "live" (= last entry).
-                "history": [], "history_idx": -1,
-                # Parallel log of the action that PRODUCED each snapshot (used to
-                # label the replay slider). entry[i] is the action that produced
-                # history[i+1]. history[0] is the initial state with no action.
-                "actions": []}
+
+# --------------------------------------------------------------------------
+# Per-session state (scalable / multi-user).
+#
+# The simulator state lives per browser session (cookie `lb_sid`), not in one
+# global — so concurrent players don't clobber each other and the service can
+# run many at once. Session sims are kept in-process under a lock with idle TTL
+# eviction; behind an autoscaler use session affinity so a player's requests
+# return to the instance holding their sim. Static config (difficulty toggles,
+# tasks path) stays global. The `STATE` proxy routes session keys to the
+# current request's session dict and config keys to the global dict, so all the
+# existing `STATE[...]` call-sites keep working unchanged.
+# --------------------------------------------------------------------------
+_CONFIG = {
+    "opts": {
+        "show_compass": os.environ.get("LB_COMPASS", "1") == "1",
+        "map_show_self": os.environ.get("LB_MAP_SELF", "1") == "1",
+    },
+    "tasks_path": None,
+    "save_dir": None,
+    "default_task": os.environ.get("LB_DEFAULT_TASK"),
+}
+_CONFIG_KEYS = set(_CONFIG.keys())
+
+_SESSIONS: dict = {}
+_SESS_LOCK = threading.Lock()
+_SESS_TTL = int(os.environ.get("LB_SESSION_TTL", "1800"))   # idle eviction (s)
+_SESS_MAX = int(os.environ.get("LB_MAX_SESSIONS", "2000"))  # hard cap
+
+
+def _fresh_session() -> dict:
+    return {"sim": None, "task_id": None, "history": [], "history_idx": -1,
+            "actions": [], "_t_start": None, "_started_at": None, "_saved_for": None}
+
+
+def _sid() -> str:
+    sid = getattr(g, "_sid", None)
+    if sid:
+        return sid
+    sid = request.cookies.get("lb_sid")
+    g._sid_isnew = not sid
+    if not sid:
+        sid = uuid.uuid4().hex
+    g._sid = sid
+    return sid
+
+
+def _session() -> dict:
+    sid = _sid()
+    now = _time.time()
+    with _SESS_LOCK:
+        # idle eviction + hard cap (drop oldest)
+        if _SESSIONS:
+            stale = [k for k, v in _SESSIONS.items() if now - v["last"] > _SESS_TTL]
+            for k in stale:
+                _SESSIONS.pop(k, None)
+            if len(_SESSIONS) > _SESS_MAX:
+                for k in sorted(_SESSIONS, key=lambda k: _SESSIONS[k]["last"])[:len(_SESSIONS) - _SESS_MAX]:
+                    _SESSIONS.pop(k, None)
+        s = _SESSIONS.get(sid)
+        if s is None:
+            s = {"data": _fresh_session(), "last": now}
+            _SESSIONS[sid] = s
+        s["last"] = now
+        return s["data"]
+
+
+class _StateProxy:
+    """dict-like: config keys -> global; everything else -> per-session."""
+    def __getitem__(self, k):
+        return _CONFIG[k] if k in _CONFIG_KEYS else _session()[k]
+    def __setitem__(self, k, v):
+        if k in _CONFIG_KEYS:
+            _CONFIG[k] = v
+        else:
+            _session()[k] = v
+    def get(self, k, default=None):
+        try:
+            return self[k]
+        except (KeyError, RuntimeError):
+            return default
+
+
+STATE = _StateProxy()
+
+
+@app.after_request
+def _persist_sid(resp):
+    if getattr(g, "_sid_isnew", False) and getattr(g, "_sid", None):
+        # On HTTPS (prod), SameSite=None;Secure so the cookie survives being
+        # embedded cross-origin in the LostBench <iframe>. On plain HTTP (local
+        # dev), fall back to Lax/no-Secure so it still works.
+        secure = request.is_secure
+        resp.set_cookie("lb_sid", g._sid, max_age=_SESS_TTL,
+                        samesite="None" if secure else "Lax",
+                        secure=secure, httponly=True)
+    return resp
 
 
 def _tasks_file():
     """Tasks jsonl to load (overridable via --tasks-path)."""
-    return STATE.get("tasks_path") or (REPO_ROOT / "data").joinpath("tasks.jsonl")
+    return _CONFIG.get("tasks_path") or (REPO_ROOT / "data").joinpath("tasks.jsonl")
 
 
 def _new_sim(task):
@@ -1160,7 +1247,7 @@ def tasks_route():
 
 @app.route("/init", methods=["GET"])
 def init_route():
-    task_id = request.args.get("task_id", STATE["task_id"])
+    task_id = request.args.get("task_id") or STATE.get("task_id") or _CONFIG.get("default_task")
     tasks = {t.task_id: t for t in load_tasks(_tasks_file())}
     if task_id not in tasks:
         # Fall back to the first non-synthetic task. Keeps the preview working
@@ -1384,17 +1471,19 @@ def main() -> int:
     p.add_argument("--save-dir", default=None,
                    help="auto-save human sessions here on submit_guess (one JSON per task)")
     args = p.parse_args()
-    STATE["task_id"] = args.task_id
-    STATE["tasks_path"] = Path(args.tasks_path) if args.tasks_path else None
-    STATE["opts"] = {"show_compass": args.compass, "map_show_self": args.map_self}
-    STATE["save_dir"] = Path(args.save_dir) if args.save_dir else None
-    if STATE["save_dir"]:
-        STATE["save_dir"].mkdir(parents=True, exist_ok=True)
-        print(f"[save] human sessions will auto-save to {STATE['save_dir']}", file=sys.stderr)
+    # Config is global (not session): write straight to _CONFIG so this is safe
+    # to call at startup (no request context).
+    _CONFIG["default_task"] = args.task_id
+    _CONFIG["tasks_path"] = Path(args.tasks_path) if args.tasks_path else None
+    _CONFIG["opts"] = {"show_compass": args.compass, "map_show_self": args.map_self}
+    _CONFIG["save_dir"] = Path(args.save_dir) if args.save_dir else None
+    if _CONFIG["save_dir"]:
+        _CONFIG["save_dir"].mkdir(parents=True, exist_ok=True)
+        print(f"[save] human sessions will auto-save to {_CONFIG['save_dir']}", file=sys.stderr)
     on = [n for n, v in (("compass", args.compass), ("map-self", args.map_self)) if v] or ["none (hardest)"]
     print(f"Open http://{args.host}:{args.port} in a browser. Task: {args.task_id}  "
           f"| toggles: {', '.join(on)}", file=sys.stderr)
-    app.run(host=args.host, port=args.port, debug=False)
+    app.run(host=args.host, port=args.port, threaded=True, debug=False)
     return 0
 
 

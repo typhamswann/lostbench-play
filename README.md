@@ -1,14 +1,26 @@
 # lostbench-play
 
-A single hosted, **playable** LostBench task server — the real simulator
+A **scalable**, hosted, playable LostBench task server — the real simulator
 (`play.py`) wrapped for deployment. Panoramas stream from the public R2 bucket
-and are rendered **server-side**, so the browser only receives a JPEG per turn:
-no client-side CORS, WebGL, or repo-bloat. Embed it in the LostBench page via
+and render **server-side**, so the browser only receives a JPEG per turn: no
+client-side CORS, WebGL, or repo-bloat. Embed it in the LostBench page via
 `<iframe>`.
 
 Bundled: `play.py` + `core/` (the simulator) + 5 subset task graphs
 (`data/world_graphs/`) listed in `data/tasks.jsonl`. The in-app dropdown lets a
-visitor switch between them. ~1 MB total; panos are fetched on demand.
+visitor switch between them. ~1 MB; panos fetched on demand.
+
+## Scalability
+
+- **Per-session state.** Each browser (cookie `lb_sid`) gets its own isolated
+  sim, kept in-process under a lock with idle-TTL eviction. Concurrent players
+  never clobber each other (verified). No global singleton.
+- **Concurrency.** Served by gunicorn — 1 worker (so the in-process session
+  store is shared) with many threads for simultaneous renders.
+- **Horizontal scale.** Run on any container autoscaler. Enable **session
+  affinity** so a player's requests return to the instance holding their sim;
+  the autoscaler adds instances under load. Tune `LB_SESSION_TTL` /
+  `LB_MAX_SESSIONS` (env) to bound per-instance memory.
 
 ## Run locally
 
@@ -19,25 +31,33 @@ WANDERBENCH_PANOS_PUBLIC_URL=https://pub-b410c3932f6242a08d9d3f2d6ed556a8.r2.dev
 # open http://localhost:8080
 ```
 
-## Deploy (Fly.io — recommended, always-on small VM)
+## Deploy (host-agnostic Docker)
 
+The image takes a `PORT` env and serves gunicorn. Works on any container host.
+
+### Google Cloud Run (recommended — autoscale, scale-to-zero, session affinity)
 ```bash
-# one-time: brew install flyctl && fly auth login
-fly launch --no-deploy --copy-config --name lostbench-play   # accept the bundled fly.toml
-fly deploy
-# -> https://lostbench-play.fly.dev
+gcloud run deploy lostbench-play \
+  --source . \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --session-affinity \
+  --memory 1Gi --cpu 1 --concurrency 12
+# -> prints a https://lostbench-play-xxxx.run.app URL
 ```
 
-That URL goes straight into the LostBench page's "Play the Benchmark" iframe.
+### Render
+Create a Web Service from this repo/Dockerfile. Enable **session affinity** in
+the service settings. Free tier cold-starts (~30 s first hit).
 
-### Alternative: Render / Railway
-Both deploy this Dockerfile directly. Render's free tier cold-starts (~30 s
-first hit); Fly's `auto_stop_machines` also cold-starts but faster. For a demo
-either is fine.
+After deploy, put the URL into the LostBench page: edit
+`lostbench/index.html`, set the play embed's `data-src` to your deploy URL.
 
-## Known limitation — single shared session
-
-`play.py` keeps **one** global sim in module state, so concurrent visitors
-would share (and clobber) each other's position. Fine for a low-traffic
-portfolio demo; if it needs true multi-user, the fix is per-Flask-session sims
-(key the sim dict by a session cookie). Flagged, not yet done.
+## Config (env)
+| var | default | meaning |
+|---|---|---|
+| `WANDERBENCH_PANOS_PUBLIC_URL` | (set in Dockerfile) | public pano bucket |
+| `LB_DEFAULT_TASK` | `cell_new_00236_easy_02` | task shown first |
+| `LB_COMPASS` / `LB_MAP_SELF` | `1` / `1` | difficulty toggles |
+| `LB_SESSION_TTL` | `1800` | idle-session eviction (s) |
+| `LB_MAX_SESSIONS` | `2000` | per-instance hard cap |
