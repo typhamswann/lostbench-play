@@ -187,10 +187,10 @@ HTML = r"""<!doctype html>
   td { padding: 2px 8px; }
   td.k { color: #888; }
   h2 { margin: 4px 0 8px; font-size: 14px; color: #888; font-weight: normal; text-transform: uppercase; letter-spacing: 0.06em; }
-  #busy { display: none; position: absolute; top: 12px; left: 12px; z-index: 4;
-    width: 24px; height: 24px; border-radius: 50%;
-    border: 2.5px solid rgba(255,255,255,0.18); border-top-color: #65d697;
-    animation: lb-spin 0.7s linear infinite; }
+  #busy { display: none; position: absolute; top: 50%; left: 50%; z-index: 4;
+    width: 32px; height: 32px; margin: -16px 0 0 -16px; border-radius: 50%;
+    border: 3px solid rgba(0,0,0,0.35); border-top-color: #65d697;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.15); animation: lb-spin 0.7s linear infinite; }
   @keyframes lb-spin { to { transform: rotate(360deg); } }
   /* Compact layout for embedding (?embed=1): hide dev/diagnostic chrome, keep
      just the view + task dropdown + submit. */
