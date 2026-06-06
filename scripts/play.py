@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import functools
 import io
 import json
 import os
@@ -61,6 +62,23 @@ _SESSIONS: dict = {}
 _SESS_LOCK = threading.Lock()
 _SESS_TTL = int(os.environ.get("LB_SESSION_TTL", "1800"))   # idle eviction (s)
 _SESS_MAX = int(os.environ.get("LB_MAX_SESSIONS", "2000"))  # hard cap
+
+# Cap concurrent renders. A render transiently decodes the full-res pano (~25 MB)
+# and runs the e2p projection; several at once (rapid clicking → many threads)
+# spike memory past the instance limit and OOM-kill the worker — which drops the
+# in-memory session, so the next click "does nothing". Serializing renders bounds
+# peak memory; on a small CPU it barely costs latency (renders are CPU-bound and
+# serialize anyway). Env-tunable.
+_RENDER_SEM = threading.BoundedSemaphore(int(os.environ.get("LB_RENDER_CONCURRENCY", "2")))
+
+
+def _render_limited(fn):
+    """Serialize the render-heavy request handlers through _RENDER_SEM."""
+    @functools.wraps(fn)
+    def _wrapped(*a, **k):
+        with _RENDER_SEM:
+            return fn(*a, **k)
+    return _wrapped
 
 
 def _fresh_session() -> dict:
@@ -373,8 +391,26 @@ function setBusy(v) {
   busyEl.style.display = pendingRequests > 0 ? 'block' : 'none';
 }
 
+// One request in flight at a time. Rapid clicks while a step is rendering get
+// coalesced to the latest (prevents a burst of concurrent requests that would
+// hammer the server). If a request comes back empty / "no sim" (e.g. the server
+// restarted), re-init the current task so play recovers instead of going dead.
+let _inFlight = false;
+let _pending = null;
+
+async function recoverSession() {
+  try {
+    const tid = (document.getElementById('task-picker') || {}).value;
+    const r = await fetch('/init' + (tid ? ('?task_id=' + encodeURIComponent(tid)) : ''));
+    const d = await r.json();
+    if (d && d.image_b64) applyResponse(d);
+  } catch (e) { /* give up quietly */ }
+}
+
 async function callBatch(actions) {
   if (!actions.length) return;
+  if (_inFlight) { _pending = actions; return; }
+  _inFlight = true;
   setBusy(true);
   lastActionEl.textContent = actions.map(a => a.tool +
     (a.args && Object.keys(a.args).length ? ' ' + JSON.stringify(a.args) : '')).join(' → ');
@@ -384,10 +420,21 @@ async function callBatch(actions) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({actions}),
     });
-    const data = await r.json();
-    applyResponse(data);
+    let data = null;
+    try { data = await r.json(); } catch (e) { data = null; }
+    if (data && data.image_b64) {
+      applyResponse(data);
+    } else if (!data || (data.error && /no sim/.test(data.error))) {
+      await recoverSession();          // session lost / empty response → recover
+    } else {
+      applyResponse(data);             // other error: shown, frame not blanked
+    }
+  } catch (e) {
+    await recoverSession();            // network / empty-body error
   } finally {
     setBusy(false);
+    _inFlight = false;
+    if (_pending) { const next = _pending; _pending = null; callBatch(next); }
   }
 }
 
@@ -1365,6 +1412,7 @@ def tasks_route():
 
 
 @app.route("/init", methods=["GET"])
+@_render_limited
 def init_route():
     task_id = request.args.get("task_id") or STATE.get("task_id") or _CONFIG.get("default_task")
     tasks = {t.task_id: t for t in load_tasks(_tasks_file())}
@@ -1498,6 +1546,7 @@ def _dispatch_one(sim: WorldSim, tool: str, args: dict) -> None:
 
 
 @app.route("/action", methods=["POST"])
+@_render_limited
 def action_route():
     if STATE["sim"] is None:
         return jsonify({"error": "no sim — call /init first"}), 400
@@ -1539,6 +1588,7 @@ def _log_click_diagnostic(sim: WorldSim, actions: list[dict]) -> None:
 
 
 @app.route("/action_batch", methods=["POST"])
+@_render_limited
 def action_batch_route():
     """Run a sequence of tool calls atomically and return one response. Used by the
     play UI to bundle e.g. [move_cursor, mouse_down, mouse_up] for a click — avoids
