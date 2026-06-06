@@ -118,7 +118,7 @@ def _render_pano(sim: WorldSim) -> Image.Image:
 # change pose, so the projected pano is identical. Caching it skips the e2p projection
 # entirely. Pose key is rounded to 0.1° so micro-jitter still hits cache.
 _VIEWPORT_CACHE: "OrderedDict[tuple, Image.Image]" = None  # type: ignore
-_VIEWPORT_CACHE_MAX = int(os.environ.get("LB_VIEWPORT_CACHE", "8"))
+_VIEWPORT_CACHE_MAX = int(os.environ.get("LB_VIEWPORT_CACHE", "6"))
 
 
 def _render_real_pano(path: Path, yaw_deg: float, pitch_deg: float, fov_deg: float) -> Image.Image:
@@ -149,22 +149,27 @@ def _render_real_pano(path: Path, yaw_deg: float, pitch_deg: float, fov_deg: flo
     return img
 
 
-# Source panos are full-res (~4064x2032 ≈ 25 MB decoded). Caching many of those
-# OOMs small instances, so we downscale on load to LB_PANO_MAX_W (default 2048,
-# ~6 MB) — no visible loss at the rendered/displayed viewport size — and keep only
-# a small LRU. Tune via env if you move to a bigger box.
-_PANO_MAX_W = int(os.environ.get("LB_PANO_MAX_W", "2048"))
-_PANO_CACHE = int(os.environ.get("LB_PANO_CACHE", "8"))
+# Source panos are full-res (~4064x2032 ≈ 25 MB decoded). Decoding/caching those
+# OOMs small instances, so we (1) use PIL draft() to have the JPEG decoder emit a
+# ~half-res image directly (~6 MB) instead of decoding 25 MB then shrinking, and
+# (2) cap the result at LB_PANO_MAX_W with a small LRU. Tune via env on a bigger box.
+_PANO_MAX_W = int(os.environ.get("LB_PANO_MAX_W", "2000"))
+_PANO_CACHE = int(os.environ.get("LB_PANO_CACHE", "6"))
 
 
 @lru_cache(maxsize=_PANO_CACHE)
 def _load_pano_array(path: str) -> np.ndarray:
-    """Load a pano JPEG to a numpy array, downscaled to bound memory. Prefers a
-    pre-optimized variant next to the original if scripts/optimize_panos.py ran."""
+    """Load a pano JPEG to a numpy array, decoded + downscaled to bound memory.
+    Prefers a pre-optimized variant if scripts/optimize_panos.py ran."""
     p = Path(path)
     opt = p.parent.parent / "panos_opt" / p.name
     src = opt if opt.exists() else p
     img = Image.open(src)
+    # draft() picks a power-of-2 JPEG scale whose result is >= the requested box,
+    # so requesting LB_PANO_MAX_W (<= half the 4064-wide source) makes the decoder
+    # emit the half-res image directly — the big memory win is here, not the resize.
+    if _PANO_MAX_W:
+        img.draft("RGB", (_PANO_MAX_W, _PANO_MAX_W))
     if img.mode != "RGB":
         img = img.convert("RGB")
     if _PANO_MAX_W and img.width > _PANO_MAX_W:

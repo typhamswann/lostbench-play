@@ -32,4 +32,4 @@ EXPOSE 8080
 
 # 1 worker (shared in-process session store) + threads for concurrency.
 # Scale OUT with more instances behind a session-affinity load balancer.
-CMD ["sh", "-c", "gunicorn --chdir scripts play:app -w 1 --threads ${LB_THREADS:-6} -b 0.0.0.0:${PORT:-8080} --timeout 120"]
+CMD ["sh", "-c", "gunicorn --chdir scripts play:app -w 1 --threads ${LB_THREADS:-3} -b 0.0.0.0:${PORT:-8080} --timeout 120"]

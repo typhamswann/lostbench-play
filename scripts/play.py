@@ -69,7 +69,7 @@ _SESS_MAX = int(os.environ.get("LB_MAX_SESSIONS", "2000"))  # hard cap
 # in-memory session, so the next click "does nothing". Serializing renders bounds
 # peak memory; on a small CPU it barely costs latency (renders are CPU-bound and
 # serialize anyway). Env-tunable.
-_RENDER_SEM = threading.BoundedSemaphore(int(os.environ.get("LB_RENDER_CONCURRENCY", "2")))
+_RENDER_SEM = threading.BoundedSemaphore(int(os.environ.get("LB_RENDER_CONCURRENCY", "1")))
 
 
 def _render_limited(fn):
